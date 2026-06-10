@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover" />
+<meta name="theme-color" content="#ea580c" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-title" content="Kebab Oracle" />
+<title>Kebab Oracle 🥙</title>
+<style>
+  :root { --orange:#ea580c; --bg:#0c0a09; --card:#1c1917; --muted:#a8a29e;
+          --line:#292524; --go:#22c55e; --skip:#ef4444; }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  body { margin:0; font:16px/1.4 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
+         background:var(--bg); color:#fafaf9; padding:env(safe-area-inset-top) 0 40px; }
+  header { padding:20px 16px 8px; }
+  h1 { font-size:24px; margin:0; }
+  .sub { color:var(--muted); font-size:13px; margin-top:4px; }
+  .panel { background:var(--card); border:1px solid var(--line); border-radius:14px;
+           margin:12px; padding:14px; }
+  label { display:block; font-size:12px; color:var(--muted); margin:10px 0 4px; text-transform:uppercase; letter-spacing:.04em; }
+  input[type=number], input[type=text] { width:100%; padding:10px; border-radius:10px;
+           border:1px solid var(--line); background:#0c0a09; color:#fafaf9; font-size:16px; }
+  .row { display:flex; gap:10px; }
+  .row > div { flex:1; }
+  button { width:100%; padding:14px; border:0; border-radius:12px; background:var(--orange);
+           color:#fff; font-size:17px; font-weight:600; margin-top:14px; cursor:pointer; }
+  button.ghost { background:transparent; border:1px solid var(--line); color:var(--muted); font-size:14px; padding:10px; margin-top:8px; }
+  input[type=range] { width:100%; accent-color:var(--orange); }
+  .slidleg { display:flex; justify-content:space-between; font-size:13px; color:var(--muted); }
+  details { margin-top:10px; }
+  summary { color:var(--muted); font-size:13px; cursor:pointer; }
+  #status { padding:0 16px; color:var(--muted); font-size:13px; min-height:18px; }
+  .shop { background:var(--card); border:1px solid var(--line); border-radius:14px;
+          margin:10px 12px; padding:12px 14px; display:flex; align-items:center; gap:12px; }
+  .shop.go { border-left:4px solid var(--go); }
+  .shop.skip { border-left:4px solid var(--skip); opacity:.72; }
+  .badge { font-size:22px; }
+  .info { flex:1; min-width:0; }
+  .nm { font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .meta { font-size:12px; color:var(--muted); margin-top:3px; }
+  .price { font-size:20px; font-weight:700; color:var(--orange); white-space:nowrap; }
+  .q { color:#fbbf24; }
+  .foot { text-align:center; color:var(--muted); font-size:12px; margin:18px 16px; }
+  a { color:var(--orange); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Kebab Oracle 🥙</h1>
+  <div class="sub">Should you walk to the Döner Laden? Berlin community prices × the math.</div>
+</header>
+
+<div class="panel">
+  <button id="locate">📍 Use my location</button>
+  <div class="row" style="margin-top:10px">
+    <div><label>Latitude</label><input id="lat" type="number" step="any" placeholder="52.4990" /></div>
+    <div><label>Longitude</label><input id="lng" type="number" step="any" placeholder="13.4180" /></div>
+  </div>
+  <label>Max walk: <span id="walkVal">20</span> min</label>
+  <input id="walk" type="range" min="5" max="60" value="20" />
+  <div class="slidleg"><span>5</span><span>60</span></div>
+
+  <details>
+    <summary>⚙️ Optional: add Google Maps ratings</summary>
+    <label>Google Maps API key (Places API New, referrer-restricted)</label>
+    <input id="mapsKey" type="text" placeholder="AIza… (stored only on this device)" />
+    <div class="sub" style="margin-top:6px">Without a key, shops are ranked on price + confidence. If the call is blocked by your browser (CORS), it falls back automatically.</div>
+  </details>
+
+  <button id="go">Find my Döner →</button>
+</div>
+
+<div id="status"></div>
+<div id="results"></div>
+<div class="foot">Data: <a href="https://kebabprice.de" target="_blank" rel="noopener">kebabprice.de</a> community map (public Firestore). Not affiliated.</div>
+
+<script>
+// ---- constants (mirror of kebab_oracle.py) -------------------------------
+const FIRESTORE = "https://firestore.googleapis.com/v1/projects/kebab-prices-2/databases/(default)/documents:runQuery";
+const PLACES = "https://places.googleapis.com/v1/places:searchText";
+const PRIOR_REVIEWS = 50, PRIOR_RATING = 3.9;
+const WALK_SPEED = 83.3, DETOUR = 1.3, WALK_K = 0.015;
+const MIN_UPVOTES = 2, PRICE_UNCERT = 1.10;
+
+const $ = id => document.getElementById(id);
+const statusEl = $("status"), results = $("results");
+
+// ---- restore saved settings ----------------------------------------------
+["lat","lng","mapsKey"].forEach(k => { const v = localStorage.getItem("ko_"+k); if (v) $(k).value = v; });
+const savedWalk = localStorage.getItem("ko_walk"); if (savedWalk){ $("walk").value = savedWalk; }
+$("walkVal").textContent = $("walk").value;
+$("walk").oninput = e => { $("walkVal").textContent = e.target.value; };
+
+$("locate").onclick = () => {
+  if (!navigator.geolocation) return setStatus("Geolocation not available.");
+  setStatus("Getting your location…");
+  navigator.geolocation.getCurrentPosition(
+    p => { $("lat").value = p.coords.latitude.toFixed(6);
+           $("lng").value = p.coords.longitude.toFixed(6); setStatus("Location set."); },
+    e => setStatus("Couldn't get location: " + e.message),
+    { enableHighAccuracy:true, timeout:10000 });
+};
+
+$("go").onclick = run;
+
+function setStatus(t){ statusEl.textContent = t; }
+
+// ---- Firestore typed-value unwrap ----------------------------------------
+function scalar(field){
+  if (!field) return null;
+  const [kind, raw] = Object.entries(field)[0];
+  if (kind === "nullValue") return null;
+  if (kind === "integerValue") return parseInt(raw,10);
+  if (kind === "doubleValue") return Number(raw);
+  if (kind === "mapValue"){ const o={}; for (const [k,v] of Object.entries(raw.fields||{})) o[k]=scalar(v); return o; }
+  return raw;
+}
+
+async function fetchPricedKebabs(){
+  const body = { structuredQuery: {
+    from:[{collectionId:"kebabs"}],
+    where:{ fieldFilter:{ field:{fieldPath:"bestPrice"}, op:"GREATER_THAN", value:{doubleValue:0} } },
+    orderBy:[{ field:{fieldPath:"bestPrice"}, direction:"ASCENDING" }]
+  }};
+  const r = await fetch(FIRESTORE, { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body) });
+  if (!r.ok) throw new Error("Firestore "+r.status);
+  const rows = await r.json();
+  return rows.filter(x=>x.document).map(x=>{
+    const f = x.document.fields, c = scalar(f.coordinates)||{};
+    return { name:scalar(f.name)||"Unknown", price:scalar(f.bestPrice),
+             upvotes:scalar(f.bestPriceUpvotes)||0, district:scalar(f.district)||"",
+             address:scalar(f.address)||"", lat:c.lat, lng:c.lng,
+             status:scalar(f.status)||"" };
+  });
+}
+
+// ---- geometry + scoring (mirror of Python) -------------------------------
+function haversine(a1,o1,a2,o2){
+  const R=6371000, p1=a1*Math.PI/180, p2=a2*Math.PI/180;
+  const dp=(a2-a1)*Math.PI/180, dl=(o2-o1)*Math.PI/180;
+  const h=Math.sin(dp/2)**2 + Math.cos(p1)*Math.cos(p2)*Math.sin(dl/2)**2;
+  return 2*R*Math.asin(Math.sqrt(h));
+}
+const walkMin = d => (d*DETOUR)/WALK_SPEED;
+function adjRating(rating,count){
+  if (rating==null || count==null) return null;
+  return (count/(count+PRIOR_REVIEWS))*rating + (PRIOR_REVIEWS/(count+PRIOR_REVIEWS))*PRIOR_RATING;
+}
+const effPrice = s => s.upvotes < MIN_UPVOTES ? s.price*PRICE_UNCERT : s.price;
+function scoreShop(s){
+  const adj = s.adj!=null ? s.adj : null;
+  s.value = (adj!=null ? adj : PRIOR_RATING) / effPrice(s);
+  s.score = s.value - s.walk*WALK_K;
+}
+function percentile(arr,p){
+  if (!arr.length) return 0;
+  const a=[...arr].sort((x,y)=>x-y), k=(a.length-1)*(p/100), lo=Math.floor(k), hi=Math.ceil(k);
+  return lo===hi ? a[lo] : a[lo]*(hi-k)+a[hi]*(k-lo);
+}
+
+async function fetchRating(shop,key){
+  const body = { textQuery:`${shop.name} Döner Berlin`, maxResultCount:1,
+    locationBias:{ circle:{ center:{latitude:shop.lat,longitude:shop.lng}, radius:200 } } };
+  const r = await fetch(PLACES, { method:"POST",
+    headers:{ "Content-Type":"application/json", "X-Goog-Api-Key":key,
+              "X-Goog-FieldMask":"places.rating,places.userRatingCount" },
+    body:JSON.stringify(body) });
+  if (!r.ok) throw new Error("Places "+r.status);
+  const j = await r.json();
+  const pl = (j.places||[])[0];
+  return pl ? { rating:pl.rating, count:pl.userRatingCount } : { rating:null, count:null };
+}
+
+// ---- main flow ------------------------------------------------------------
+async function run(){
+  const lat=parseFloat($("lat").value), lng=parseFloat($("lng").value);
+  const maxWalk=parseFloat($("walk").value), key=$("mapsKey").value.trim();
+  if (isNaN(lat)||isNaN(lng)) return setStatus("Enter coordinates or tap “Use my location”.");
+  ["lat","lng","walk","mapsKey"].forEach(k=>localStorage.setItem("ko_"+k,$(k==="walk"?"walk":k).value));
+  results.innerHTML=""; setStatus("Fetching community prices…");
+
+  let shops;
+  try { shops = await fetchPricedKebabs(); }
+  catch(e){ return setStatus("Failed to load prices: "+e.message); }
+
+  let cands = shops.filter(s=>s.lat!=null && (s.status===""||s.status==="active"))
+    .map(s=>{ const d=haversine(lat,lng,s.lat,s.lng); return {...s, dist:d, walk:walkMin(d)}; })
+    .filter(s=>s.walk<=maxWalk);
+
+  if (!cands.length){
+    return setStatus(`No open priced shops within ${maxWalk} min. Try widening the slider — only ~25 of 900 shops have community prices so far.`);
+  }
+
+  if (key){
+    setStatus(`Looking up Google ratings for ${cands.length} shops…`);
+    let failed=0;
+    for (const s of cands){
+      try { const r=await fetchRating(s,key); s.rating=r.rating; s.count=r.count; s.adj=adjRating(r.rating,r.count); }
+      catch(e){ failed++; }
+    }
+    if (failed===cands.length) setStatus("Maps blocked (CORS or key) — ranked on price + confidence.");
+    else setStatus(`Ranked ${cands.length} shops within ${maxWalk} min walk.`);
+  } else {
+    setStatus(`Ranked ${cands.length} shops within ${maxWalk} min walk (price + confidence).`);
+  }
+
+  cands.forEach(scoreShop);
+  const threshold = percentile(cands.map(s=>s.score),75);
+  cands.sort((a,b)=>b.score-a.score);
+  render(cands,threshold);
+}
+
+function render(cands,threshold){
+  results.innerHTML = cands.map(s=>{
+    const go = s.score>=threshold;
+    const conf = s.upvotes>=MIN_UPVOTES ? "" : '<span class="q"> ?</span>';
+    const rating = s.rating!=null ? `★ ${s.rating.toFixed(1)} (${s.count})` : "no rating";
+    const maps = `https://www.google.com/maps/search/${encodeURIComponent(s.name+" "+s.address)}`;
+    return `<div class="shop ${go?'go':'skip'}">
+      <div class="badge">${go?'✅':'🟥'}</div>
+      <div class="info">
+        <div class="nm"><a href="${maps}" target="_blank" rel="noopener">${esc(s.name)}</a></div>
+        <div class="meta">${rating} · ${Math.round(s.walk)} min walk · ${esc(s.district)}</div>
+      </div>
+      <div class="price">€${s.price.toFixed(2)}${conf}</div>
+    </div>`;
+  }).join("");
+}
+function esc(t){ const d=document.createElement("div"); d.textContent=t; return d.innerHTML; }
+</script>
+</body>
+</html>
