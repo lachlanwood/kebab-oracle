@@ -19,7 +19,7 @@
   .panel { background:var(--card); border:1px solid var(--line); border-radius:14px;
            margin:12px; padding:14px; }
   label { display:block; font-size:12px; color:var(--muted); margin:10px 0 4px; text-transform:uppercase; letter-spacing:.04em; }
-  input[type=number], input[type=text] { width:100%; padding:10px; border-radius:10px;
+  input[type=number], input[type=text], select { width:100%; padding:10px; border-radius:10px;
            border:1px solid var(--line); background:#0c0a09; color:#fafaf9; font-size:16px; }
   .row { display:flex; gap:10px; }
   .row > div { flex:1; }
@@ -61,6 +61,17 @@
   <input id="walk" type="range" min="5" max="60" value="20" />
   <div class="slidleg"><span>5</span><span>60</span></div>
 
+  <label>Min rating: <span id="rateVal">Any</span></label>
+  <input id="minRate" type="range" min="0" max="5" step="0.5" value="0" />
+  <div class="slidleg"><span>Any</span><span>5.0★</span></div>
+
+  <label>Pickiness (who gets a ✅)</label>
+  <select id="pick">
+    <option value="75">Picky — only the top 25%</option>
+    <option value="50">Balanced — top 50%</option>
+    <option value="0">Hungry — anything in range is a go</option>
+  </select>
+
   <details>
     <summary>⚙️ Optional: add Google Maps ratings</summary>
     <label>Google Maps API key (Places API New, referrer-restricted)</label>
@@ -87,10 +98,13 @@ const $ = id => document.getElementById(id);
 const statusEl = $("status"), results = $("results");
 
 // ---- restore saved settings ----------------------------------------------
-["lat","lng","mapsKey"].forEach(k => { const v = localStorage.getItem("ko_"+k); if (v) $(k).value = v; });
+["lat","lng","mapsKey","minRate","pick"].forEach(k => { const v = localStorage.getItem("ko_"+k); if (v!=null) $(k).value = v; });
 const savedWalk = localStorage.getItem("ko_walk"); if (savedWalk){ $("walk").value = savedWalk; }
 $("walkVal").textContent = $("walk").value;
 $("walk").oninput = e => { $("walkVal").textContent = e.target.value; };
+const rateLabel = v => Number(v) === 0 ? "Any" : Number(v).toFixed(1) + "★+";
+$("rateVal").textContent = rateLabel($("minRate").value);
+$("minRate").oninput = e => { $("rateVal").textContent = rateLabel(e.target.value); };
 
 $("locate").onclick = () => {
   if (!navigator.geolocation) return setStatus("Geolocation not available.");
@@ -176,8 +190,9 @@ async function fetchRating(shop,key){
 async function run(){
   const lat=parseFloat($("lat").value), lng=parseFloat($("lng").value);
   const maxWalk=parseFloat($("walk").value), key=$("mapsKey").value.trim();
+  const minRate=parseFloat($("minRate").value), pickPct=parseFloat($("pick").value);
   if (isNaN(lat)||isNaN(lng)) return setStatus("Enter coordinates or tap “Use my location”.");
-  ["lat","lng","walk","mapsKey"].forEach(k=>localStorage.setItem("ko_"+k,$(k==="walk"?"walk":k).value));
+  ["lat","lng","walk","mapsKey","minRate","pick"].forEach(k=>localStorage.setItem("ko_"+k,$(k).value));
   results.innerHTML=""; setStatus("Fetching community prices…");
 
   let shops;
@@ -205,8 +220,22 @@ async function run(){
     setStatus(`Ranked ${cands.length} shops within ${maxWalk} min walk (price + confidence).`);
   }
 
+  // Hard rating floor — needs Maps ratings to mean anything.
+  if (minRate > 0){
+    if (!key){
+      setStatus(`Min rating ${minRate.toFixed(1)}★ needs a Google Maps key — showing all, ignoring the floor.`);
+    } else {
+      cands = cands.filter(s => s.rating != null && s.rating >= minRate);
+      if (!cands.length){
+        results.innerHTML = "";
+        return setStatus(`Nothing rated ${minRate.toFixed(1)}★+ within ${maxWalk} min. Lower the rating or widen the walk.`);
+      }
+      setStatus(`${cands.length} shop(s) rated ${minRate.toFixed(1)}★+ within ${maxWalk} min walk.`);
+    }
+  }
+
   cands.forEach(scoreShop);
-  const threshold = percentile(cands.map(s=>s.score),75);
+  const threshold = pickPct <= 0 ? -Infinity : percentile(cands.map(s=>s.score), pickPct);
   cands.sort((a,b)=>b.score-a.score);
   render(cands,threshold);
 }

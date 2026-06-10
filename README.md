@@ -30,6 +30,15 @@ python kebab_oracle.py --lat 52.4990 --lng 13.4180 --max-walk 20
 | `--maps-key` | Google Maps API key (or set `GOOGLE_MAPS_API_KEY`) |
 | `--no-maps` | skip Maps entirely, rank on price + confidence |
 
+## Web app
+
+`index.html` is a self-contained phone app (deployed at
+https://lachlanwood.github.io/kebab-oracle/). It uses your location, the
+**Max walk**, **Min rating ★**, and **Pickiness** controls, and runs the same
+math as the CLI. The rating floor and ratings column only apply when a Google
+Maps key is supplied (the kebab data carries no quality signal of its own);
+without one it ranks on price + confidence. Settings persist on-device.
+
 ## The math
 
 Per shop within walking range:
